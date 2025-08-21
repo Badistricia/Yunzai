@@ -1,0 +1,4 @@
+# AI Chat Plugin Configuration
+API_KEY: "your_api_key_here"
+MODEL: "default_model"
+MEMORY_ENABLED: true
