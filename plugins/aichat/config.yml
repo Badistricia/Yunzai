@@ -1,0 +1,45 @@
+# 默认模型, 当某个群未单独设置时, 会使用此模型
+# 格式为: '供应商名.模型名'
+default_model: "deepseek.deepseek-chat"
+
+# 默认聊天参数
+default_parameters:
+  # AI的创造力, 0表示最准确, 2表示最奔放
+  temperature: 0.7
+  # 单次回复的最大长度
+  max_tokens: 2048
+
+# 代理设置
+proxy:
+  # 是否启用代理, true 或 false
+  enable: false
+  # 你的代理地址, 例如: http://127.0.0.1:7890
+  url: ""
+
+# API供应商列表
+providers:
+  gemini:
+    # 请将你的API Key填入下方列表, 可以填多个, 程序会随机抽取一个使用
+    api_keys:
+      - "AIzaSyA338A5OELtP8Z7JfLW2U8r02ohCOYPbbU"
+      - "AIzaSyClCitmW9spnerxUsNPkf2nVyP7ePUaMIs"
+    base_url: "https://generativelanguage.googleapis.com"
+
+  deepseek:
+    api_keys:
+      - "sk-476330950dd24ff6869b6a301930f275"
+    base_url: "https://api.deepseek.com"
+
+# 模型列表
+models:
+  gemini:
+    gemini-1.5-pro:
+      path: "/v1beta/models/gemini-1.5-pro-latest:generateContent"
+    gemini-1.5-flash:
+      path: "/v1beta/models/gemini-1.5-flash-latest:generateContent"
+
+  deepseek:
+    deepseek-chat:
+      path: "/v1/chat/completions"
+    deepseek-reasoner:
+      path: "/v1/chat/completions"

@@ -1,4 +1,4 @@
 # AI Chat Plugin Configuration
-API_KEY: "your_api_key_here"
-MODEL: "default_model"
+API_KEY: "sk-476330950dd24ff6869b6a301930f275"
+MODEL: "deepseek-chat"
 MEMORY_ENABLED: true

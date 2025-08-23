@@ -1,18 +1,32 @@
-import plugin from '../../lib/plugins/plugin.js';
-import { getConfig, saveConfig, loadConfig } from './lib/configManager.js';
-import { getData, saveData, loadData } from './lib/conversationManager.js';
+import plugin from "../../lib/plugins/plugin.js"
+import fetch from "node-fetch"
+import HttpsProxyAgent from "https-proxy-agent"
+import { getModelConfig, getAllModels, reloadConfig } from "./lib/configManager.js"
+import {
+  getGroupData,
+  saveGroupData,
+  getPersonasList,
+  getPersona,
+  addPersona,
+  removePersona,
+  setProcessing,
+  isProcessing,
+  setMemoryEnabled,
+  isMemoryEnabled,
+  deleteConversationPairs,
+} from "./lib/conversationManager.js"
 
 export class aichat extends plugin {
   constructor() {
     super({
       name: "aichat",
-      dsc: "AI Chat Plugin",
+      dsc: "AI Chat Plugin with Per-Group Persistence",
       event: "message",
-      priority: 5000,
+      priority: 4999,
       rule: [
         {
-          reg: "^#?(添加人格|设置人格)",
-          fnc: "addPersona",
+          reg: "^#?设置人格",
+          fnc: "setPersona",
         },
         {
           reg: "^#?人格列表",
@@ -23,16 +37,28 @@ export class aichat extends plugin {
           fnc: "switchPersona",
         },
         {
-          reg: "^(/t|@bot)",
-          fnc: "chat",
-        },
-        {
-          reg: "^#?(重置人格|重置会话)",
-          fnc: "resetPersona",
-        },
-        {
           reg: "^#?删除人格",
-          fnc: "deletePersona",
+          fnc: "removePersona",
+        },
+        {
+          reg: "^#?模型列表",
+          fnc: "listModels",
+        },
+        {
+          reg: "^#?设置模型",
+          fnc: "setModel",
+        },
+        {
+          reg: "^#?当前模型",
+          fnc: "currentModel",
+        },
+        {
+          reg: "^#?设置温度",
+          fnc: "setTemperature",
+        },
+        {
+          reg: "^#?设置回复长度",
+          fnc: "setMaxTokens",
         },
         {
           reg: "^#?对话记忆",
@@ -40,286 +66,363 @@ export class aichat extends plugin {
         },
         {
           reg: "^#?删除对话",
-          fnc: "deleteHistory",
+          fnc: "deleteConversation",
         },
         {
-          reg: "^#?(~ai配置重载|重载配置)",
-          fnc: "reloadConfig",
+          reg: "^(\/t|#t|\s*\[CQ:at,qq=.*?\])",
+          fnc: "chat",
         },
         {
-          reg: "^#?(查询模型|模型列表)",
-          fnc: "listModels",
+          reg: "^#?重置会话",
+          fnc: "resetHistory",
         },
         {
-          reg: "^#?切换模型",
-          fnc: "switchModel",
+          reg: "^#?重载AI配置",
+          fnc: "reloadPluginConfig",
         },
       ],
-    });
+    })
   }
 
-  async addPersona(e) {
-    const parts = e.msg.split(' ');
-    const personaName = parts[1];
-    const personaDesc = parts.slice(2).join(' ');
-
-    if (!personaName || personaName.length > 24) {
-      this.reply('人格名不能为空且不能大于24位');
-      return true;
-    }
-
-    if (!personaDesc) {
-      this.reply('人格设定不能为空');
-      return true;
-    }
-
-    const data = getData();
-    data[personaName] = { description: personaDesc, history: [] };
-    saveData();
-    this.reply(`人格 ${personaName} 已添加/更新`);
-    return true;
-  }
-
-  async listPersonas(e) {
-    const data = getData();
-    const config = getConfig();
-    const personaList = Object.keys(data);
-    if (personaList.length === 0) {
-      this.reply("当前无任何人格");
-      return true;
-    }
-
-    const currentPersona = config.currentPersona || "default";
-    let replyMsg = "当前所有人格：\n";
-    for (const persona of personaList) {
-      replyMsg += `- ${persona}`;
-      if (persona === currentPersona) {
-        replyMsg += " (当前)";
-      }
-      replyMsg += "\n";
-    }
-    this.reply(replyMsg);
-    return true;
-  }
-
-  async switchPersona(e) {
-    const config = getConfig();
-    const data = getData();
-    const personaName = e.msg.split(' ')[1];
-    if (!personaName) {
-      config.currentPersona = "default";
-      saveConfig();
-      this.reply("已切换到默认人格");
-      return true;
-    }
-
-    if (!data[personaName]) {
-      this.reply(`人格 ${personaName} 不存在`);
-      return true;
-    }
-
-    config.currentPersona = personaName;
-    saveConfig();
-    this.reply(`已切换到人格 ${personaName}`);
-    return true;
+  async checkPermission(e) {
+    return true // Always grant permission
   }
 
   async chat(e) {
-    const config = getConfig();
-    const data = getData();
-    const msg = e.msg.replace(/^(\/t|@bot)/, '').trim();
+    if (!e.isGroup || !e.group_id) return false
+
+    // Concurrent control
+    if (isProcessing(e.group_id)) {
+      this.reply("等待回复中，请稍后再对话")
+      return true
+    }
+    setProcessing(e.group_id, true)
+
+    const msg = e.msg.replace(/^#t/, "").trim()
+
     if (!msg) {
-      return true;
+      setProcessing(e.group_id, false)
+      return false
     }
 
-    const currentPersona = config.currentPersona || 'default';
-    if (!data[currentPersona]) {
-      data[currentPersona] = { description: '默认人格', history: [] };
+    const groupData = getGroupData(e.group_id)
+    const modelConfig = getModelConfig(groupData.model)
+
+    if (!modelConfig) {
+      console.error(
+        `[AI Chat] No model configured for group ${e.group_id} and no default model found.`,
+      )
+      setProcessing(e.group_id, false)
+      return true
     }
 
-    const history = data[currentPersona].history;
-    if (config.MEMORY_ENABLED) {
-      history.push({ role: 'user', content: msg });
+    groupData.history.push({ role: "user", content: msg })
+
+    let payload
+    const systemPrompt = { role: "system", content: groupData.persona.description }
+
+    if (modelConfig.provider === "gemini") {
+      payload = {
+        contents: [
+          ...groupData.history.map(item => ({
+            role: item.role === "assistant" ? "model" : "user",
+            parts: [{ text: item.content }],
+          })),
+        ],
+        systemInstruction: {
+          role: "system",
+          parts: [{ text: groupData.persona.description }],
+        },
+        generationConfig: {
+          temperature: groupData.parameters.temperature,
+          maxOutputTokens: groupData.parameters.max_tokens,
+        },
+      }
+    } else {
+      payload = {
+        model: modelConfig.modelId.split(".")[1],
+        messages: [systemPrompt, ...groupData.history],
+        temperature: groupData.parameters.temperature,
+        max_tokens: groupData.parameters.max_tokens,
+      }
     }
 
-    const personaDesc = data[currentPersona].description;
+    const fetchOptions = {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${modelConfig.apiKey}`,
+      },
+      body: JSON.stringify(payload),
+    }
+
+    if (modelConfig.proxy?.enable && modelConfig.proxy?.url) {
+      fetchOptions.agent = new HttpsProxyAgent(modelConfig.proxy.url)
+    }
 
     try {
-      // Replace with your actual API endpoint and key
-      const response = await fetch('https://api.example.com/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${config.API_KEY}`
-        },
-        body: JSON.stringify({
-          model: config.MODEL,
-          messages: [
-            { role: 'system', content: personaDesc },
-            ...history
-          ]
-        })
-      });
+      console.log("[AI Chat] Sending request to:", modelConfig.fullUrl)
+      const response = await fetch(modelConfig.fullUrl, fetchOptions)
+      console.log("[AI Chat] Response status:", response.status)
 
       if (response.ok) {
-        const result = await response.json();
-        const reply = result.choices[0].message.content;
-        this.reply(reply);
-        if (config.MEMORY_ENABLED) {
-          history.push({ role: 'assistant', content: reply });
-          saveData();
+        const result = await response.json()
+        let replyText = ""
+
+        if (modelConfig.provider === "gemini") {
+          replyText = result.candidates[0]?.content?.parts[0]?.text || ""
+        } else {
+          replyText = result.choices[0]?.message?.content || ""
+        }
+
+        if (replyText) {
+          this.reply(replyText)
+          // Only save to history if memory is enabled
+          if (isMemoryEnabled(e.group_id)) {
+            groupData.history.push({ role: "assistant", content: replyText })
+          }
+        } else {
+          this.reply("AI返回了空消息，是不是被你问倒了？")
+          console.error("[AI Chat] Empty response from API:", result)
         }
       } else {
-        this.reply('AI a pouting, and does not want to talk to you.');
-        console.error(await response.text());
+        const errorText = await response.text()
+        console.error(`[AI Chat] API Error ${response.status}:`, errorText)
+        const errorMapping = {
+          400: "请求格式错误，请检查参数配置",
+          401: "API密钥无效或过期，请检查配置",
+          402: "账户余额不足，请充值",
+          403: "访问被拒绝，权限不足",
+          404: "模型或接口不存在",
+          422: "参数验证失败，请检查请求格式",
+          429: "请求频率过高，请稍后重试",
+          500: "服务器内部错误，请稍后重试",
+          502: "网关错误，网络连接问题",
+          503: "服务不可用，服务器过载",
+          504: "网关超时，请检查网络连接"
+        }
+        const errorMsg = errorMapping[response.status] || `未知错误 (${response.status})`
+        this.reply(`AI出错了: ${errorMsg}`)
       }
     } catch (error) {
-      this.reply('There seems to be a problem with the AI service, please try again later.');
-      console.error(error);
+      this.reply("AI服务连接失败，请检查网络、代理或配置。")
+      console.error("[AI Chat] Fetch Error:", error)
+    } finally {
+      setProcessing(e.group_id, false)
     }
 
-    return true;
+    saveGroupData(e.group_id, groupData)
+
+    return true
   }
 
-  async resetPersona(e) {
-    const config = getConfig();
-    const data = getData();
-    const personaName = e.msg.split(' ')[1] || config.currentPersona || "default";
+  async setPersona(e) {
+    if (!e.isGroup) return this.reply("该功能仅限群聊使用。")
+    if (!(await this.checkPermission(e))) return true
 
-    if (personaName === "default") {
-        if (!data["default"]) {
-            data["default"] = { history: [] };
-        }
-        data["default"].history = [];
-        saveData();
-        this.reply("默认人格的会话记忆已重置");
-        return true;
+    const personaDesc = e.msg.replace(/^#?设置人格/, "").trim()
+    if (!personaDesc) {
+      this.reply("人格设定不能为空，例如：\n#设置人格 你是一个只会说'喵'的猫娘。")
+      return true
     }
 
-    if (!data[personaName]) {
-      this.reply(`人格 ${personaName} 不存在`);
-      return true;
-    }
+    const groupData = getGroupData(e.group_id)
+    groupData.persona.description = personaDesc
+    saveGroupData(e.group_id, groupData)
 
-    data[personaName].history = [];
-    saveData();
-    this.reply(`人格 ${personaName} 的会话记忆已重置`);
-    return true;
+    this.reply(`本群人格已更新。`)
+    return true
   }
 
-  async deletePersona(e) {
-    const config = getConfig();
-    const data = getData();
-    const personaName = e.msg.split(' ')[1];
+  async listPersonas(e) {
+    const personasList = getPersonasList()
+    this.reply(`可用人格列表:\n- ${personasList.join("\n- ")}`)
+    return true
+  }
+
+  async switchPersona(e) {
+    if (!e.isGroup) return this.reply("该功能仅限群聊使用。")
+    if (!(await this.checkPermission(e))) return true
+
+    const personaName = e.msg.replace(/^#?切换人格/, "").trim()
     if (!personaName) {
-      this.reply("请指定要删除的人格名");
-      return true;
+      this.reply("请指定要切换的人格名称。")
+      return true
     }
 
-    if (!data[personaName]) {
-      this.reply(`人格 ${personaName} 不存在`);
-      return true;
+    const persona = getPersona(personaName)
+    if (!persona) {
+      this.reply(`人格 '${personaName}' 不存在。`)
+      return true
     }
 
-    delete data[personaName];
-    saveData();
+    const groupData = getGroupData(e.group_id)
+    groupData.persona = persona
+    groupData.history = [] // Clear history when switching persona
+    saveGroupData(e.group_id, groupData)
 
-    if (config.currentPersona === personaName) {
-      config.currentPersona = "default";
-      saveConfig();
-      this.reply(`人格 ${personaName} 已删除，当前人格已切换到默认人格`);
-    } else {
-      this.reply(`人格 ${personaName} 已删除`);
-    }
-
-    return true;
+    this.reply(`已切换到人格: ${personaName}`)
+    return true
   }
 
-  async toggleMemory(e) {
-    const config = getConfig();
-    const option = e.msg.split(' ')[1];
-    if (!option || (option !== '开' && option !== '关')) {
-      this.reply("请提供有效选项 (开/关)");
-      return true;
+  async removePersona(e) {
+    if (!e.isGroup) return this.reply("该功能仅限群聊使用。")
+    if (!(await this.checkPermission(e))) return true
+
+    const personaName = e.msg.replace(/^#?删除人格/, "").trim()
+    if (!personaName) {
+      this.reply("请指定要删除的人格名称。")
+      return true
     }
 
-    config.MEMORY_ENABLED = option === '开';
-    saveConfig();
-    this.reply(`对话记忆已${config.MEMORY_ENABLED ? '开启' : '关闭'}`);
-    return true;
-  }
-
-  async deleteHistory(e) {
-    const config = getConfig();
-    const data = getData();
-    const numToDelete = parseInt(e.msg.split(' ')[1]);
-    if (isNaN(numToDelete) || numToDelete <= 0) {
-      this.reply("请提供一个有效的数字");
-      return true;
+    try {
+      removePersona(personaName)
+      this.reply(`人格 '${personaName}' 已删除。`)
+    } catch (error) {
+      this.reply(error.message)
     }
-
-    const currentPersona = config.currentPersona || "default";
-    if (!data[currentPersona] || !data[currentPersona].history) {
-      this.reply("当前人格没有对话历史");
-      return true;
-    }
-
-    const history = data[currentPersona].history;
-    const numPairsToDelete = numToDelete * 2;
-    if (history.length < numPairsToDelete) {
-      this.reply(`历史记录不足 ${numToDelete} 对`);
-      return true;
-    }
-
-    history.splice(-numPairsToDelete);
-    saveData();
-    this.reply(`已删除最近 ${numToDelete} 对对话`);
-    return true;
-  }
-
-  async reloadConfig(e) {
-    loadConfig();
-    loadData();
-    this.reply("AI Chat configuration reloaded.");
-    return true;
+    return true
   }
 
   async listModels(e) {
-    const config = getConfig();
-    try {
-      // Replace with your actual API endpoint and key
-      const response = await fetch('https://api.example.com/models', {
-        headers: {
-          'Authorization': `Bearer ${config.API_KEY}`
-        }
-      });
-
-      if (response.ok) {
-        const result = await response.json();
-        const models = result.data.map(model => model.id);
-        this.reply(`可用模型列表：\n${models.join('\n')}`);
-      } else {
-        this.reply('无法获取模型列表');
-        console.error(await response.text());
-      }
-    } catch (error) {
-      this.reply('获取模型列表时出错');
-      console.error(error);
+    const models = getAllModels()
+    if (models.length === 0) {
+      this.reply("配置文件中没有可用的模型。")
+      return true
     }
-    return true;
+    this.reply(`可用模型列表:\n- ${models.join("\n- ")}`)
+    return true
   }
 
-  async switchModel(e) {
-    const config = getConfig();
-    const model = e.msg.split(' ')[1];
-    if (!model) {
-      this.reply('请指定要切换的模型');
-      return true;
+  async setModel(e) {
+    if (!e.isGroup) return this.reply("该功能仅限群聊使用。")
+    if (!(await this.checkPermission(e))) return true
+
+    const modelId = e.msg.replace(/^#?设置模型/, "").trim()
+    if (!modelId) {
+      this.reply("请指定要切换的模型ID, 例如: #设置模型 gemini.gemini-1.5-pro")
+      return true
     }
 
-    config.MODEL = model;
-    saveConfig();
-    this.reply(`已切换到模型 ${model}`);
-    return true;
+    const availableModels = getAllModels()
+    if (!availableModels.includes(modelId)) {
+      this.reply(`模型 ${modelId} 不存在于配置中。`)
+      return true
+    }
+
+    const groupData = getGroupData(e.group_id)
+    groupData.model = modelId
+    saveGroupData(e.group_id, groupData)
+
+    this.reply(`本群模型已切换到: ${modelId}`)
+    return true
+  }
+
+  async currentModel(e) {
+    if (!e.isGroup) return this.reply("该功能仅限群聊使用。")
+    const groupData = getGroupData(e.group_id)
+    const modelConfig = getModelConfig(groupData.model)
+    this.reply(`本群当前模型: ${modelConfig.modelId}`)
+    return true
+  }
+
+  async setTemperature(e) {
+    if (!e.isGroup) return this.reply("该功能仅限群聊使用。")
+    if (!(await this.checkPermission(e))) return true
+
+    const tempStr = e.msg.replace(/^#?设置温度/, "").trim()
+    const temp = parseFloat(tempStr)
+
+    if (isNaN(temp) || temp < 0 || temp > 2) {
+      this.reply("请输入有效的温度值 (0到2之间的数字)。")
+      return true
+    }
+
+    const groupData = getGroupData(e.group_id)
+    groupData.parameters.temperature = temp
+    saveGroupData(e.group_id, groupData)
+
+    this.reply(`本群AI温度已设置为: ${temp}`)
+    return true
+  }
+
+  async setMaxTokens(e) {
+    if (!e.isGroup) return this.reply("该功能仅限群聊使用。")
+    if (!(await this.checkPermission(e))) return true
+
+    const tokenStr = e.msg.replace(/^#?设置回复长度/, "").trim()
+    const tokens = parseInt(tokenStr, 10)
+
+    if (isNaN(tokens) || tokens < 1 || tokens > 8192) {
+      this.reply("请输入有效的回复长度 (1到8192之间的整数)。")
+      return true
+    }
+
+    const groupData = getGroupData(e.group_id)
+    groupData.parameters.max_tokens = tokens
+    saveGroupData(e.group_id, groupData)
+
+    this.reply(`本群AI最大回复长度已设置为: ${tokens}`)
+    return true
+  }
+
+  async toggleMemory(e) {
+    if (!e.isGroup) return this.reply("该功能仅限群聊使用。")
+    if (!(await this.checkPermission(e))) return true
+
+    const action = e.msg
+      .replace(/^#?对话记忆/, "")
+      .trim()
+      .toLowerCase()
+    let enabled
+
+    if (["开启", "开", "on", "启用"].includes(action)) {
+      enabled = true
+    } else if (["关闭", "关", "off", "禁用"].includes(action)) {
+      enabled = false
+    } else {
+      this.reply("用法：对话记忆 开启/关闭 或 开/关 或 on/off 或 启用/禁用")
+      return true
+    }
+
+    setMemoryEnabled(e.group_id, enabled)
+    this.reply(`本群的对话记忆已${enabled ? "开启" : "关闭"}`)
+    return true
+  }
+
+  async deleteConversation(e) {
+    if (!e.isGroup) return this.reply("该功能仅限群聊使用。")
+    if (!(await this.checkPermission(e))) return true
+
+    const numStr = e.msg.replace(/^#?删除对话/, "").trim()
+    const numPairs = parseInt(numStr, 10)
+
+    if (isNaN(numPairs) || numPairs <= 0) {
+      this.reply("请输入有效的数字（大于0）")
+      return true
+    }
+
+    deleteConversationPairs(e.group_id, numPairs)
+    this.reply(`已删除本群的最近 ${numPairs} 对对话`)
+    return true
+  }
+
+  async resetHistory(e) {
+    if (!e.isGroup) return this.reply("该功能仅限群聊使用。")
+    if (!(await this.checkPermission(e))) return true
+
+    const groupData = getGroupData(e.group_id)
+    groupData.history = []
+    saveGroupData(e.group_id, groupData)
+
+    this.reply("本群的会话记忆已重置。")
+    return true
+  }
+
+  async reloadPluginConfig(e) {
+    if (!e.isMaster) return true
+    reloadConfig()
+    this.reply("AI Chat 配置已重载。")
+    return true
   }
 }

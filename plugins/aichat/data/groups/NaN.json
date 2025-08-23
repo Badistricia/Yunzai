@@ -1,0 +1,8 @@
+{
+  "model": "deepseek.deepseek-chat",
+  "persona": {
+    "name": "default",
+    "description": "You are a helpful assistant."
+  },
+  "history": []
+}
